@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { use_tick_stream } from '../hooks/use_tick_stream';
-import { FeedStatusBadge } from './FeedStatusBadge';
 import { StatusBar } from './StatusBar';
 import { SymbolList } from './SymbolList';
 import { SymbolDetailModal } from './SymbolDetailModal';
@@ -24,13 +23,8 @@ export function MainWindow() {
   return (
     <div className="main-window">
       <header className="app-header">
-        <div className="app-header-row">
-          <div>
-            <h1>12e Trading</h1>
-            <span className="subtitle">Yahoo Finance · US + ASX · 2s polling</span>
-          </div>
-          <FeedStatusBadge />
-        </div>
+        <h1>12e Trading</h1>
+        <span className="subtitle">Yahoo Finance · US + ASX · 10min updates</span>
       </header>
       <main className="content">
         <SymbolList symbols={symbols} on_select={set_selected} />
