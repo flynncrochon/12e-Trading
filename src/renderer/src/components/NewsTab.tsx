@@ -14,58 +14,112 @@ const PRESETS: ReadonlyArray<{ id: Exclude<PresetId, 'custom'>; label: string; d
   { id: 'all', label: 'All', days: null },
 ];
 
-// Substrings (case-insensitive) that mark a headline as routine financial
-// reporting rather than a black-swan event. Borderline picks like "profit"
-// or "sales" are intentionally excluded — they appear in genuine crisis
-// stories ("profit warning", "sales scandal") and we don't want to drop
-// those. Match is whole-word-ish via regex word boundaries.
-const ROUTINE_KEYWORDS = [
-  'earnings',
-  'revenue',
-  'revenues',
-  'eps',
-  'beats',
-  'misses',
-  'beat estimates',
-  'miss estimates',
-  'guidance',
-  'dividend',
-  'dividends',
-  'buyback',
-  'share repurchase',
-  'analyst',
-  'analysts',
-  'upgrade',
-  'upgrades',
-  'downgrade',
-  'downgrades',
-  'price target',
-  'quarterly',
-  'quarter',
-  'q1',
-  'q2',
-  'q3',
-  'q4',
-  'full year',
-  'fiscal',
-  'fy20',
-  'fy21',
-  'fy22',
-  'fy23',
-  'fy24',
-  'fy25',
-  'fy26',
-  'forecast',
-  'outlook',
+// Words / phrases that signal genuinely-bad news in a headline. Curated
+// against ~100 real Yahoo headlines from current day_losers — terms that
+// appear in clearly-negative stories (price plunges, lawsuits, layoffs,
+// guidance cuts) are in; terms that swing both ways ("falls", "drops",
+// "cut" alone, "weakness") are deliberately out, since black-swan mode
+// errs on precision. A missed item just falls back to the toggle-off
+// view, so it's safer to under-match than to over-match.
+//
+// Note: there's no separate "routine" exclusion list. A headline like
+// "stock plunges after Q1 earnings miss" used to get dropped because of
+// "earnings"; now it correctly passes via "plunges". Earnings/guidance
+// reports without a negative signal are still excluded (just by failing
+// this list, not by a separate gate).
+const NEGATIVE_SIGNAL_KEYWORDS = [
+  // Price-action language
+  'plunge', 'plunges', 'plunged',
+  'crash', 'crashes', 'crashed',
+  'tumble', 'tumbles', 'tumbled',
+  'tank', 'tanks', 'tanked',
+  'slump', 'slumps', 'slumped',
+  'sink', 'sinks', 'sinking',
+  'slide', 'slides', 'sliding', 'slid',
+  'dive', 'dives', 'dived',
+  'rout', 'sell-off', 'selloff',
+  'obliterate', 'obliterated', 'obliterating',
+
+  // Action verbs (negative)
+  'slash', 'slashes', 'slashed', 'slashing',
+  'cuts', 'cutting',
+  'stumble', 'stumbles', 'stumbled', 'stumbling',
+  'downgrade', 'downgraded', 'downgrades',
+
+  // Crisis / scandal
+  'fraud', 'scandal', 'bribery', 'corruption',
+  'embezzle', 'embezzled', 'embezzlement',
+  'allegation', 'allegations', 'accused', 'accusation',
+
+  // Legal / regulatory
+  'lawsuit', 'sued', 'sues', 'suing',
+  'indicted', 'indictment',
+  'investigation', 'investigating',
+  'probe', 'probed', 'probes',
+  'subpoena', 'antitrust',
+  'fined', 'penalty', 'penalties',
+  'sanction', 'sanctions', 'sanctioned',
+  'banned',
+
+  // Cybersecurity
+  'breach', 'breached', 'breaches',
+  'hack', 'hacked', 'hacker', 'hackers',
+  'ransomware', 'cyberattack', 'cyber attack',
+  'data leak', 'leaked',
+
+  // Operational disasters
+  'recall', 'recalls', 'recalled',
+  'defect', 'defective', 'malfunction',
+  'outage', 'outages',
+  'halts', 'halted',
+  'suspends', 'suspended', 'suspension',
+  'delays', 'delayed',
+  'withdraws', 'withdrawn',
+
+  // HR turmoil
+  'fired', 'firing',
+  'resigns', 'resigned', 'resignation',
+  'ousted', 'ouster',
+  'layoff', 'layoffs', 'lay-off', 'lay off',
+  'job cuts',
+  'sacked',
+  'step down', 'steps down', 'stepped down',
+
+  // Financial distress
+  'bankruptcy', 'bankrupt',
+  'insolvency', 'insolvent',
+  'default', 'defaulted',
+  'restructuring',
+
+  // Warnings / negative outlook
+  'warning', 'warns', 'warned',
+  'profit warning',
+  'slowdown',
+  'crisis',
+  'shortage',
+  'struggling', 'troubles', 'troubled',
+
+  // Negative outcomes
+  'failed', 'failure',
+  'rejected', 'rejection',
+
+  // Severe events
+  'dies', 'dead', 'killed', 'death', 'fatal',
+  'explosion',
+  'collapse', 'collapses', 'collapsed', 'collapsing',
 ];
 
-const ROUTINE_REGEX = new RegExp(
-  `\\b(?:${ROUTINE_KEYWORDS.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`,
+const NEGATIVE_REGEX = new RegExp(
+  `\\b(?:${NEGATIVE_SIGNAL_KEYWORDS.map((k) =>
+    k
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\s+/g, '\\s+'),
+  ).join('|')})\\b`,
   'i',
 );
 
-function is_routine_headline(title: string): boolean {
-  return ROUTINE_REGEX.test(title);
+function has_negative_signal(title: string): boolean {
+  return NEGATIVE_REGEX.test(title);
 }
 
 function start_of_today(): Date {
@@ -152,7 +206,7 @@ export function NewsTab() {
     if (black_swan) {
       const ceiling = -Math.abs(min_drop_pct);
       pool = pool.filter(
-        (it) => it.adjusted_pct <= ceiling && !is_routine_headline(it.title),
+        (it) => it.adjusted_pct <= ceiling && has_negative_signal(it.title),
       );
     }
     return pool.slice().sort((a, b) => a.adjusted_pct - b.adjusted_pct);
@@ -265,7 +319,8 @@ export function NewsTab() {
           />
           Black swan only
           <span className="news-toggle-hint">
-            hides earnings, guidance, analyst calls, dividends
+            requires negative-signal language in the headline (plunge, lawsuit,
+            slashed, recall, layoff, etc.)
           </span>
         </label>
         <label className="news-range-field">
