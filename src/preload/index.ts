@@ -13,16 +13,6 @@ export interface SymbolEntry {
   ticker: string;
 }
 
-export type FeedState = 'idle' | 'polling' | 'degraded' | 'error';
-
-export interface FeedStatus {
-  state: FeedState;
-  source: string;
-  last_poll_at: number | null;
-  last_error: string | null;
-  consecutive_failures: number;
-}
-
 export interface BackfillPoint {
   t: number;
   price: number;
@@ -44,8 +34,6 @@ export interface TradingApi {
   list_symbols(): Promise<SymbolEntry[]>;
   subscribe(symbol_ids: number[]): Promise<{ ok: boolean }>;
   unsubscribe(symbol_ids: number[]): Promise<{ ok: boolean }>;
-  on_feed_status(handler: (status: FeedStatus) => void): () => void;
-  query_feed_status(): Promise<FeedStatus>;
   on_history_backfill(handler: (batch: BackfillBatch) => void): () => void;
   query_history_backfill(): Promise<BackfillBatch[]>;
   on_summary_update(handler: (summary: SymbolSummary) => void): () => void;
@@ -68,16 +56,6 @@ const api: TradingApi = {
   },
   unsubscribe(symbol_ids) {
     return ipcRenderer.invoke('unsubscribe', { symbol_ids });
-  },
-  on_feed_status(handler) {
-    const listener = (_event: IpcRendererEvent, status: FeedStatus) => handler(status);
-    ipcRenderer.on('feed:status', listener);
-    return () => {
-      ipcRenderer.off('feed:status', listener);
-    };
-  },
-  query_feed_status() {
-    return ipcRenderer.invoke('feed:status:get');
   },
   on_history_backfill(handler) {
     const listener = (_event: IpcRendererEvent, batch: BackfillBatch) => handler(batch);

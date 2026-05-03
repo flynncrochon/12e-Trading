@@ -2,15 +2,12 @@ import { type BrowserWindow } from 'electron';
 import { logger } from '../logger';
 import { all_tickers, ticker_to_id } from '../symbol_registry';
 import { type IpcTick } from '../tick_bridge';
-import { publish_status } from './feed_status';
 import { backfill_history, clear_backfill_cache } from './yahoo_history';
 import { get_yahoo, reset_yahoo } from './yahoo_instance';
 import { clear_summary_cache, fetch_summaries } from './yahoo_summary';
 
-const POLL_INTERVAL_MS = 2000;
-const BACKOFF_STEPS_MS = [2000, 4000, 8000, 30_000];
-const DEGRADED_AFTER_FAILURES = 1;
-const ERROR_AFTER_FAILURES = 3;
+const POLL_INTERVAL_MS = 10 * 60 * 1000;
+const BACKOFF_STEPS_MS = [5_000, 15_000, 60_000, 5 * 60_000];
 
 interface YahooQuoteShape {
   symbol: string;
@@ -75,18 +72,12 @@ async function poll_once(window: BrowserWindow): Promise<void> {
     }
 
     consecutive_failures = 0;
-    publish_status(window, {
-      state: 'polling',
-      last_poll_at: Date.now(),
-      last_error: null,
-      consecutive_failures: 0,
-    });
     logger.debug({ count: ticks.length }, 'yahoo: poll ok');
 
     if (!backfill_started) {
       backfill_started = true;
       // Fire-and-forget: backfill + summary run alongside the polling loop.
-      // Errors are logged inside each function and don't disturb the live feed.
+      // Errors are logged inside each function and don't disturb polling.
       backfill_history(yahoo, window).catch((err) => {
         logger.error({ err: String(err) }, 'history: backfill driver crashed');
       });
@@ -97,16 +88,6 @@ async function poll_once(window: BrowserWindow): Promise<void> {
   } catch (err) {
     consecutive_failures += 1;
     const msg = err instanceof Error ? err.message : String(err);
-    const next_state = consecutive_failures >= ERROR_AFTER_FAILURES
-      ? 'error'
-      : consecutive_failures >= DEGRADED_AFTER_FAILURES
-        ? 'degraded'
-        : 'polling';
-    publish_status(window, {
-      state: next_state,
-      last_error: msg,
-      consecutive_failures,
-    });
     logger.warn({ err: msg, consecutive_failures }, 'yahoo: poll failed');
   } finally {
     in_flight = false;
@@ -130,13 +111,6 @@ export function start_yahoo_feed(window: BrowserWindow): void {
   clear_backfill_cache();
   clear_summary_cache();
 
-  publish_status(window, {
-    state: 'idle',
-    source: 'yahoo',
-    last_poll_at: null,
-    last_error: null,
-    consecutive_failures: 0,
-  });
   logger.info({ symbol_count: all_tickers().length }, 'yahoo: feed starting');
   poll_once(window);
 }
