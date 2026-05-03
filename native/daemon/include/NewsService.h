@@ -62,8 +62,16 @@ private:
 
     void run();
 
-    // Pulls day_losers for one region and appends to `out`.
+    // Pulls day_losers via Yahoo's predefined screener for one region (used
+    // for "US"; AU isn't reliably populated by that screener so we rank
+    // ASX manually below) and appends results to `out`.
     void collect_losers(std::string_view region, std::vector<LoserStock>& out);
+
+    // Fetches quotes for a fixed ASX universe in a single HTTP call, ranks
+    // by today's % change ascending, and appends the worst entries to
+    // `out`. Used in place of the screener for AU because Yahoo's
+    // predefined day_losers screener returns nothing for region=AU.
+    void collect_asx_losers(std::vector<LoserStock>& out);
 
     // Lazily fetch + cache a benchmark's daily series. Returns nullptr only
     // on hard fetch failure (transport, parse). An empty series is still
@@ -71,8 +79,10 @@ private:
     const DailySeries* benchmark_series(const std::string& bench_ticker,
                                         std::int64_t       period1_seconds);
 
-    // Maps a ticker to the benchmark we score against.
-    static std::string benchmark_for(const std::string& ticker);
+    // Returns the chain of benchmarks to try for a ticker (preferred first).
+    // Used so we can fall back to ETF proxies when Yahoo's index quote for
+    // ^AXJO is unavailable.
+    static std::vector<std::string> benchmark_chain_for(const std::string& ticker);
 
     EventChannel& channel_;
     int           lookback_days_;

@@ -5,6 +5,19 @@ const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY  = 24 * MS_PER_HOUR;
 
 type PresetId = '24h' | '7d' | '30d' | '90d' | 'all' | 'custom';
+type Region = 'all' | 'us' | 'asx';
+
+function ticker_region(ticker: string): Exclude<Region, 'all'> {
+  // Yahoo suffixes ASX-listed symbols with `.AX`. Everything else (US
+  // equities, ADRs, ETFs, indices) we bucket as "us" — the day_losers
+  // screener only pulls from US + AU pools, so this two-way split is
+  // exhaustive in practice.
+  return ticker.endsWith('.AX') ? 'asx' : 'us';
+}
+
+function region_matches(ticker: string, region: Region): boolean {
+  return region === 'all' || ticker_region(ticker) === region;
+}
 
 const PRESETS: ReadonlyArray<{ id: Exclude<PresetId, 'custom'>; label: string; days: number | null }> = [
   { id: '24h', label: '24h', days: 1   },
@@ -179,8 +192,24 @@ export function NewsTab() {
   const [from_date, set_from_date] = useState<Date>(() => days_before(today, 90));
   const [to_date,   set_to_date]   = useState<Date>(() => today);
   const [preset,    set_preset]    = useState<PresetId>('90d');
+  const [region,    set_region]    = useState<Region>('all');
   const [black_swan,    set_black_swan]    = useState<boolean>(true);
   const [min_drop_pct,  set_min_drop_pct]  = useState<number>(3);
+
+  // Per-region counts so the sub-tabs can show how many items each bucket
+  // holds. Counted from the negative-impact pool (no black-swan filter
+  // applied) so toggling regions doesn't make the count flicker as the
+  // headline filter changes.
+  const region_counts = useMemo(() => {
+    let us = 0;
+    let asx = 0;
+    for (const it of items) {
+      if (it.adjusted_pct >= 0) continue;
+      if (ticker_region(it.ticker) === 'asx') asx += 1;
+      else us += 1;
+    }
+    return { all: us + asx, us, asx };
+  }, [items]);
 
   // Window is half-open: [from_ms, to_ms). to_ms is the start of the day
   // *after* to_date so headlines on to_date itself are still included.
@@ -190,16 +219,17 @@ export function NewsTab() {
     return { from_ms, to_ms };
   }, [from_date, to_date]);
 
-  // Items that pass the date + negative-impact filter, before black-swan
-  // tightening. Used to count how many we hide so the empty state can say
-  // "X hidden by black-swan filter".
+  // Items that pass the date + region + negative-impact filter, before
+  // black-swan tightening. Used to count how many we hide so the empty
+  // state can say "X hidden by black-swan filter".
   const in_window_negative = useMemo(() => {
     return items.filter((it) =>
       it.adjusted_pct < 0 &&
       it.published_t >= window_ms.from_ms &&
-      it.published_t < window_ms.to_ms,
+      it.published_t < window_ms.to_ms &&
+      region_matches(it.ticker, region),
     );
-  }, [items, window_ms]);
+  }, [items, window_ms, region]);
 
   const negative = useMemo(() => {
     let pool = in_window_negative;
@@ -269,8 +299,26 @@ export function NewsTab() {
     [items],
   );
 
+  const REGION_LABELS: Record<Region, string> = { all: 'All', us: 'US', asx: 'ASX' };
+
   return (
     <div className="news-tab">
+      <div className="news-subtabs" role="tablist" aria-label="Region">
+        {(['all', 'us', 'asx'] as const).map((r) => (
+          <button
+            key={r}
+            type="button"
+            role="tab"
+            aria-selected={region === r}
+            className={`news-subtab ${region === r ? 'active' : ''}`}
+            onClick={() => set_region(r)}
+          >
+            {REGION_LABELS[r]}
+            <span className="news-subtab-count">{region_counts[r]}</span>
+          </button>
+        ))}
+      </div>
+
       <div className="news-controls">
         <div className="news-presets" role="group" aria-label="Timeframe preset">
           {PRESETS.map((p) => (

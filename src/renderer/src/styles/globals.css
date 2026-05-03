@@ -382,6 +382,54 @@ body,
   max-width: 880px;
 }
 
+.news-subtabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.news-subtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+
+.news-subtab:hover {
+  color: var(--text);
+}
+
+.news-subtab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.news-subtab-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.news-subtab.active .news-subtab-count {
+  color: var(--text);
+  background: rgba(230, 237, 243, 0.12);
+}
+
 .news-controls {
   display: flex;
   flex-wrap: wrap;

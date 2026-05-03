@@ -11,9 +11,11 @@ namespace td {
 
 struct YahooQuote {
     std::string   symbol;
-    double        price     = 0.0;
-    std::int64_t  volume    = 0;
-    bool          has_price = false; // regularMarketPrice was present and non-null
+    double        price          = 0.0;
+    std::int64_t  volume         = 0;
+    double        change_pct     = 0.0; // regularMarketChangePercent (e.g. -2.5)
+    bool          has_price      = false; // regularMarketPrice was present and non-null
+    bool          has_change_pct = false;
 };
 
 struct YahooQuoteResult {
@@ -92,7 +94,21 @@ public:
     // Calls /v1/finance/search for one symbol and returns up to `count`
     // recent news items. No crumb required. Items missing a title or
     // providerPublishTime are dropped silently.
+    //
+    // WARNING: this endpoint silently returns generic US market news when
+    // queried with a non-US suffix like ".AX" — never use it for ASX
+    // tickers; route those through news_rss() instead.
     YahooNewsResult news(const std::string& symbol, int count = 10);
+
+    // Fetches Yahoo's per-symbol RSS feed and parses out up to `count`
+    // items. This is the only way to get ticker-specific news for ASX
+    // symbols since /v1/finance/search ignores the .AX suffix. `region`
+    // and `lang` are e.g. "AU"/"en-AU" or "US"/"en-US"; they only affect
+    // edition selection on Yahoo's side.
+    YahooNewsResult news_rss(const std::string& symbol,
+                             std::string_view   region,
+                             std::string_view   lang,
+                             int                count = 10);
 
     // Calls Yahoo's predefined-screener endpoint and returns the matching
     // quotes. Common scr_id values: "day_losers", "day_gainers",

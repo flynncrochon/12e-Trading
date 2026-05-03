@@ -30,6 +30,20 @@ NewsService::DailySeries to_series(const ChartResult& r) {
     return s;
 }
 
+// Top 50-ish ASX names by market cap. The list is intentionally manual and
+// hardcoded — Yahoo's day_losers screener returns nothing for region=AU,
+// so we fetch quotes for these tickers in one call and rank by today's
+// change ourselves. Re-broaden later if we need deeper loser coverage.
+constexpr const char* kAsxUniverse[] = {
+    "BHP.AX", "CBA.AX", "CSL.AX", "NAB.AX", "WBC.AX", "ANZ.AX", "FMG.AX", "RIO.AX",
+    "WES.AX", "MQG.AX", "TLS.AX", "WOW.AX", "GMG.AX", "TCL.AX", "WTC.AX", "ALL.AX",
+    "QBE.AX", "STO.AX", "REA.AX", "SCG.AX", "WDS.AX", "JHX.AX", "COL.AX", "S32.AX",
+    "AMC.AX", "RMD.AX", "SUN.AX", "ORG.AX", "IAG.AX", "QAN.AX", "ASX.AX", "MIN.AX",
+    "PLS.AX", "LYC.AX", "AGL.AX", "MGR.AX", "VCX.AX", "TPG.AX", "DXS.AX", "ALD.AX",
+    "CPU.AX", "EVN.AX", "AZJ.AX", "REH.AX", "BSL.AX", "ORI.AX", "SOL.AX", "NHF.AX",
+    "SHL.AX", "NST.AX",
+};
+
 } // namespace
 
 bool NewsService::DailySeries::close_before(std::int64_t t_ms, double& out) const {
@@ -73,13 +87,15 @@ void NewsService::stop_and_join() {
     running_.store(false, std::memory_order_release);
 }
 
-std::string NewsService::benchmark_for(const std::string& ticker) {
-    // ASX tickers end in ".AX" — score against the S&P/ASX 200 index. Every
-    // other ticker (US equities + indices) scores against SPY.
+std::vector<std::string> NewsService::benchmark_chain_for(const std::string& ticker) {
+    // ASX tickers end in ".AX" — score against the S&P/ASX 200 index, with
+    // STW (SPDR S&P/ASX 200) and IOZ (iShares Core S&P/ASX 200) as ETF
+    // fallbacks in case the index quote is unavailable on Yahoo. US tickers
+    // score against SPY only.
     if (ticker.size() >= 3 && ticker.compare(ticker.size() - 3, 3, ".AX") == 0) {
-        return "^AXJO";
+        return {"^AXJO", "STW.AX", "IOZ.AX"};
     }
-    return "SPY";
+    return {"SPY"};
 }
 
 const NewsService::DailySeries*
@@ -109,12 +125,46 @@ void NewsService::collect_losers(std::string_view region, std::vector<LoserStock
     out.reserve(out.size() + r.quotes.size());
     for (const auto& q : r.quotes) {
         if (!q.has_change_pct) continue;
-        // The screener occasionally returns gainers near zero or zero-change
-        // entries when the loser pool is thin; keep only genuinely negative
-        // movers so the news feed doesn't fill with no-news flat names.
         if (q.change_pct >= 0.0) continue;
         out.push_back({q.symbol, q.short_name, q.change_pct});
     }
+}
+
+void NewsService::collect_asx_losers(std::vector<LoserStock>& out) {
+    std::vector<std::string> tickers;
+    tickers.reserve(std::size(kAsxUniverse));
+    for (const auto* t : kAsxUniverse) tickers.emplace_back(t);
+
+    auto r = client_.quote(tickers);
+    if (!r.ok()) {
+        std::ostringstream os;
+        os << "news: ASX quote failed: " << r.error;
+        Logger::instance().warn(os.str());
+        return;
+    }
+
+    // Pull just the negatives, then take the worst N.
+    std::vector<LoserStock> ranked;
+    ranked.reserve(r.quotes.size());
+    for (const auto& q : r.quotes) {
+        if (!q.has_change_pct || q.change_pct >= 0.0) continue;
+        ranked.push_back({q.symbol, /*short_name=*/"", q.change_pct});
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const LoserStock& a, const LoserStock& b) {
+                  return a.change_pct < b.change_pct;
+              });
+    if (static_cast<int>(ranked.size()) > losers_per_region_) {
+        ranked.resize(losers_per_region_);
+    }
+
+    {
+        std::ostringstream os;
+        os << "news: ASX losers from quote rank: " << ranked.size();
+        Logger::instance().info(os.str());
+    }
+
+    out.insert(out.end(), ranked.begin(), ranked.end());
 }
 
 void NewsService::run() {
@@ -128,7 +178,7 @@ void NewsService::run() {
     std::vector<LoserStock> losers;
     collect_losers("US", losers);
     if (stop_.load(std::memory_order_acquire)) { running_.store(false); return; }
-    collect_losers("AU", losers);
+    collect_asx_losers(losers);
     if (stop_.load(std::memory_order_acquire)) { running_.store(false); return; }
 
     // De-dup by ticker — Yahoo occasionally surfaces dual-listed names in
@@ -160,16 +210,37 @@ void NewsService::run() {
         const DailySeries series = to_series(chart_r);
         if (series.points.empty()) continue;
 
-        const std::string bench        = benchmark_for(s.ticker);
-        const auto*       bench_series = benchmark_series(bench, period1);
-        if (!bench_series || bench_series->points.empty()) {
+        const auto         bench_chain  = benchmark_chain_for(s.ticker);
+        const DailySeries* bench_series = nullptr;
+        std::string        bench;
+        for (const auto& candidate : bench_chain) {
+            const auto* candidate_series = benchmark_series(candidate, period1);
+            if (candidate_series && !candidate_series->points.empty()) {
+                bench_series = candidate_series;
+                bench        = candidate;
+                break;
+            }
+        }
+        if (!bench_series) {
             std::ostringstream os;
-            os << "news: " << s.ticker << ": benchmark " << bench << " unavailable";
+            os << "news: " << s.ticker << ": no benchmark in chain (";
+            for (std::size_t i = 0; i < bench_chain.size(); ++i) {
+                if (i) os << ", ";
+                os << bench_chain[i];
+            }
+            os << ") returned data";
             Logger::instance().warn(os.str());
             continue;
         }
 
-        auto news_r = client_.news(s.ticker, news_per_symbol_);
+        // Yahoo's /v1/finance/search ignores the `.AX` suffix and returns
+        // generic US news for ASX tickers, so route ASX through the RSS
+        // feed (which is the only endpoint that respects the suffix).
+        const bool is_asx = s.ticker.size() >= 3 &&
+                            s.ticker.compare(s.ticker.size() - 3, 3, ".AX") == 0;
+        auto news_r = is_asx
+                          ? client_.news_rss(s.ticker, "AU", "en-AU", news_per_symbol_)
+                          : client_.news(s.ticker, news_per_symbol_);
         if (!news_r.ok()) {
             std::ostringstream os;
             os << "news: feed " << s.ticker << ": " << news_r.error;
