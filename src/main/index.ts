@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import { join } from 'node:path';
 import { DaemonSupervisor } from './daemon_supervisor';
 import { event_bridge } from './event_bridge';
@@ -81,6 +81,7 @@ async function start_pipeline(window: BrowserWindow): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  Menu.setApplicationMenu(null);
   register_ipc_handlers();
   // Listener has to come up before the daemon spawn so the daemon's
   // connect() call has somewhere to land.

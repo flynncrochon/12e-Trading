@@ -86,6 +86,7 @@ bool EventChannel::connect(std::uint16_t port) {
 }
 
 bool EventChannel::send_json(const std::string& json) {
+    std::lock_guard<std::mutex> guard(send_mutex_);
     if (!connected()) {
         last_error_ = "not connected";
         return false;

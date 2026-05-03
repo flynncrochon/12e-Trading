@@ -15,7 +15,6 @@ public:
     struct Entry {
         std::uint32_t id;
         std::string   ticker;
-        double        seed_price;
     };
 
     static SymbolRegistry& instance();

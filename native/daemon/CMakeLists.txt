@@ -3,9 +3,9 @@ add_executable(market-data-service
     src/Logger.cpp
     src/Config.cpp
     src/SymbolRegistry.cpp
-    src/MockFeed.cpp
     src/YahooFeed.cpp
     src/YahooHistory.cpp
+    src/NewsService.cpp
     src/EventChannel.cpp
     src/MarketDataService.cpp
 )

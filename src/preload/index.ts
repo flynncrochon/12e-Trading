@@ -29,6 +29,21 @@ export interface SymbolSummary {
   month_ago_t: number;
 }
 
+export interface NewsItem {
+  ticker: string;
+  short_name: string;
+  news_id: string;
+  title: string;
+  publisher: string;
+  link: string;
+  published_t: number;
+  stock_pct: number;
+  benchmark: string;
+  benchmark_pct: number;
+  adjusted_pct: number;
+  daily_change_pct: number;
+}
+
 export interface TradingApi {
   on_ticks(handler: (batch: PreloadTick[]) => void): () => void;
   list_symbols(): Promise<SymbolEntry[]>;
@@ -38,6 +53,9 @@ export interface TradingApi {
   query_history_backfill(): Promise<BackfillBatch[]>;
   on_summary_update(handler: (summary: SymbolSummary) => void): () => void;
   query_summaries(): Promise<SymbolSummary[]>;
+  on_news_item(handler: (item: NewsItem) => void): () => void;
+  query_news(): Promise<NewsItem[]>;
+  open_external(url: string): Promise<{ ok: boolean }>;
 }
 
 const api: TradingApi = {
@@ -76,6 +94,19 @@ const api: TradingApi = {
   },
   query_summaries() {
     return ipcRenderer.invoke('summary:query');
+  },
+  on_news_item(handler) {
+    const listener = (_event: IpcRendererEvent, item: NewsItem) => handler(item);
+    ipcRenderer.on('news:item', listener);
+    return () => {
+      ipcRenderer.off('news:item', listener);
+    };
+  },
+  query_news() {
+    return ipcRenderer.invoke('news:query');
+  },
+  open_external(url) {
+    return ipcRenderer.invoke('open_external', url);
   },
 };
 

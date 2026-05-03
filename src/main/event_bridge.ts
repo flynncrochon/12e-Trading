@@ -21,6 +21,22 @@ export interface SymbolSummary {
   month_ago_t: number;
 }
 
+export interface NewsItem {
+  ticker: string;
+  short_name: string;
+  news_id: string;
+  title: string;
+  publisher: string;
+  link: string;
+  published_t: number;
+  stock_pct: number;
+  benchmark: string;
+  benchmark_pct: number;
+  adjusted_pct: number;
+  /** Today's % change from the day_losers screener that surfaced this stock. */
+  daily_change_pct: number;
+}
+
 interface DaemonEvent {
   type: string;
   // additional per-type fields
@@ -46,6 +62,10 @@ class EventBridge {
 
   private backfill_cache = new Map<number, BackfillBatch>();
   private summary_cache = new Map<number, SymbolSummary>();
+  // Keyed by news_id so the same wire-level event is idempotent: multiple
+  // emissions of the same uuid (e.g. on a daemon reconnect) collapse to one
+  // entry instead of duplicating the row.
+  private news_cache = new Map<string, NewsItem>();
 
   private window: BrowserWindow | null = null;
 
@@ -99,9 +119,14 @@ class EventBridge {
     return Array.from(this.summary_cache.values());
   }
 
+  get_news_cache(): NewsItem[] {
+    return Array.from(this.news_cache.values());
+  }
+
   clear_caches(): void {
     this.backfill_cache.clear();
     this.summary_cache.clear();
+    this.news_cache.clear();
   }
 
   private on_connection(socket: net.Socket): void {
@@ -174,6 +199,27 @@ class EventBridge {
         this.summary_cache.set(summary.symbol_id, summary);
         if (this.window && !this.window.isDestroyed()) {
           this.window.webContents.send('summary:update', summary);
+        }
+        return;
+      }
+      case 'news:item': {
+        const item: NewsItem = {
+          ticker: event.ticker as string,
+          short_name: (event.short_name as string) ?? '',
+          news_id: event.news_id as string,
+          title: event.title as string,
+          publisher: (event.publisher as string) ?? '',
+          link: (event.link as string) ?? '',
+          published_t: event.published_t as number,
+          stock_pct: event.stock_pct as number,
+          benchmark: (event.benchmark as string) ?? '',
+          benchmark_pct: event.benchmark_pct as number,
+          adjusted_pct: event.adjusted_pct as number,
+          daily_change_pct: (event.daily_change_pct as number) ?? 0,
+        };
+        this.news_cache.set(item.news_id, item);
+        if (this.window && !this.window.isDestroyed()) {
+          this.window.webContents.send('news:item', item);
         }
         return;
       }

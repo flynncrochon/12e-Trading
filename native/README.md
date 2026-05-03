@@ -17,8 +17,8 @@ native/
 ├── common/
 │   ├── include/   Tick.h, ShmLayout.h, ShmRingBuffer.h, ShmRegion.h
 │   └── src/       ShmRegion.cpp (Win32 / POSIX wrapper)
-├── daemon/        Singletons (Logger, Config, SymbolRegistry, MockFeed,
-│                  MarketDataService) + main.cpp
+├── daemon/        Singletons (Logger, Config, SymbolRegistry, YahooFeed,
+│                  YahooHistory, MarketDataService) + main.cpp
 ├── reader/        ShmReader.cpp + N-API binding (binding.cc)
 ├── tools/
 │   └── shm-smoke/ Standalone consumer

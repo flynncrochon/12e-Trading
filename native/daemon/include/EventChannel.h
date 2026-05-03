@@ -1,20 +1,24 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 namespace td {
 
 // Length-prefixed JSON event channel. Out-of-band relative to the SPSC tick
 // ring — used by the daemon to push variable-size, low-frequency events
-// (history backfill, monthly summary) up to the Electron main process.
+// (history backfill, monthly summary, news impact) up to the Electron main
+// process.
 //
 // Wire format: [uint32 length, little-endian][N bytes of UTF-8 JSON]
 //
 // Connects as a TCP client to 127.0.0.1:<port> at startup. The Electron main
 // owns the listener (created on an ephemeral port and passed to the daemon
-// via --event-port). One connection at a time; not thread-safe — callers
-// must serialize send_json() calls.
+// via --event-port). send_json() is mutex-guarded so multiple producers
+// (history + news) can write to the same channel concurrently without
+// interleaving frames; connect()/close() are not — call those from one
+// thread.
 class EventChannel {
 public:
     EventChannel()  = default;
@@ -27,8 +31,9 @@ public:
     // describes the cause.
     bool connect(std::uint16_t port);
 
-    // Sends one frame. Returns false on first send failure (subsequent calls
-    // also fail until reconnect/close).
+    // Sends one frame atomically with respect to other send_json() calls.
+    // Returns false on first send failure (subsequent calls also fail until
+    // reconnect/close).
     bool send_json(const std::string& json);
 
     bool connected() const noexcept;
@@ -41,6 +46,7 @@ private:
     // wide enough for both; -1 means "no socket" on POSIX, ~0 on Windows.
     std::intptr_t socket_ = -1;
     std::string   last_error_;
+    std::mutex    send_mutex_;
 };
 
 } // namespace td

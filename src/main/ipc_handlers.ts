@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { ipcMain, shell } from 'electron';
 import { event_bridge } from './event_bridge';
 import { logger } from './logger';
 import { SEED_SYMBOLS } from './symbol_registry';
@@ -31,4 +31,18 @@ export function register_ipc_handlers(): void {
   ipcMain.handle('history:backfill:query', () => event_bridge.get_backfill_cache());
 
   ipcMain.handle('summary:query', () => event_bridge.get_summary_cache());
+
+  ipcMain.handle('news:query', () => event_bridge.get_news_cache());
+
+  ipcMain.handle('open_external', async (_event, url: string) => {
+    // Defence in depth — the renderer only ever passes URLs that came from
+    // the daemon's news feed, but we still gate on http(s) so a stray local
+    // path can't trigger a file:// open.
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+      logger.warn({ url }, 'open_external: refused non-http(s) URL');
+      return { ok: false };
+    }
+    await shell.openExternal(url);
+    return { ok: true };
+  });
 }

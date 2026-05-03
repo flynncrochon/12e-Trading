@@ -2,7 +2,7 @@
 #include "EventChannel.h"
 #include "Logger.h"
 #include "MarketDataService.h"
-#include "MockFeed.h"
+#include "NewsService.h"
 #include "ShmLayout.h"
 #include "SymbolRegistry.h"
 #include "YahooHistory.h"
@@ -86,21 +86,21 @@ int main(int argc, char** argv) {
 
     (void) Config::instance();
     (void) SymbolRegistry::instance();
-    (void) MockFeed::instance();
 
     {
         std::ostringstream os;
-        os << "market-data-service: " << SymbolRegistry::instance().size() << " symbols, "
-           << Config::instance().ticks_per_second() << " ticks/sec";
+        os << "market-data-service: " << SymbolRegistry::instance().size() << " symbols";
         Logger::instance().info(os.str());
     }
 
     MarketDataService::instance().start();
 
     // Optional event channel: if --event-port=N was passed, connect back to
-    // the Electron main and run the one-shot history backfill + summary.
+    // the Electron main and run the one-shot history backfill, summary, and
+    // news-impact fetch.
     EventChannel                channel;
     std::optional<YahooHistory> history;
+    std::optional<NewsService>  news;
     if (auto port = parse_event_port(argc, argv); port.has_value()) {
         std::ostringstream os;
         os << "market-data-service: event channel port=" << *port;
@@ -117,9 +117,14 @@ int main(int argc, char** argv) {
                             cfg.summary_lookback_days(),
                             cfg.month_ago_days());
             history->start();
+            news.emplace(channel,
+                         cfg.news_lookback_days(),
+                         cfg.news_per_symbol(),
+                         cfg.losers_per_region());
+            news->start();
         }
     } else {
-        Logger::instance().info("market-data-service: no --event-port; skipping history+summary");
+        Logger::instance().info("market-data-service: no --event-port; skipping history+summary+news");
     }
 
     // Status heartbeat every 5 seconds while the loop runs.
@@ -137,6 +142,7 @@ int main(int argc, char** argv) {
     }
 
     Logger::instance().info("market-data-service: shutdown requested");
+    if (news) news->stop_and_join();
     if (history) history->stop_and_join();
     channel.close();
     MarketDataService::instance().stop();

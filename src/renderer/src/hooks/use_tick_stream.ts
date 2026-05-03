@@ -4,6 +4,7 @@
    *call-site* checks the rule also covers (no hooks in conditions/loops)
    are still satisfied — they just can't be enforced by the linter here. */
 import { useEffect } from 'react';
+import { ingest_news, ingest_news_batch } from '../store/news';
 import { ingest_history, ingest_ticks, set_summary } from '../store/prices';
 import type { Tick } from '../types/tick';
 
@@ -26,9 +27,12 @@ export function use_tick_stream(): void {
         month_ago_t: s.month_ago_t,
       });
     });
-    // Pull anything cached before this hook subscribed — backfill and summary
-    // messages can be sent before the React effect runs, so the initial round
-    // can otherwise be missed entirely.
+    const unsub_news = window.trading.on_news_item((item) => {
+      ingest_news(item);
+    });
+    // Pull anything cached before this hook subscribed — backfill, summary,
+    // and news messages can be sent before the React effect runs, so the
+    // initial round can otherwise be missed entirely.
     let cancelled = false;
     window.trading.query_history_backfill().then((batches) => {
       if (cancelled) return;
@@ -43,11 +47,16 @@ export function use_tick_stream(): void {
         });
       }
     });
+    window.trading.query_news().then((list) => {
+      if (cancelled) return;
+      ingest_news_batch(list);
+    });
     return () => {
       cancelled = true;
       unsub_ticks();
       unsub_history();
       unsub_summary();
+      unsub_news();
     };
   }, []);
 }

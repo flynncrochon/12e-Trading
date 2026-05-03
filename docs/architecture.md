@@ -1,7 +1,7 @@
 # Architecture
 
-A walkthrough of the data path, from synthetic price generation to a flickering
-React row, and the boundaries between the four moving parts.
+A walkthrough of the data path, from Yahoo Finance to a flickering React row,
+and the boundaries between the four moving parts.
 
 ## Boxes
 
@@ -15,9 +15,9 @@ React row, and the boundaries between the four moving parts.
 |  +----------+    +----------------------+                    |
 |       |                  |                                   |
 |       v                  v                                   |
-|  +----------+     +-----------------+   step()  +---------+  |
-|  |  Logger  | <-- | MockFeed         | -------> |  Tick   |  |
-|  |          |     | (singleton, GBM) |          +---------+  |
+|  +----------+     +-----------------+   poll()  +---------+  |
+|  |  Logger  | <-- | YahooFeed        | -------> |  Tick   |  |
+|  |          |     | (singleton, HTTP)|          +---------+  |
 |  +----------+     +-----------------+               |        |
 |                          ^                          v        |
 |                          |  drain loop          try_push()   |
@@ -69,10 +69,11 @@ React row, and the boundaries between the four moving parts.
 
 ## Tick lifecycle
 
-1. `MarketDataService::run_loop` wakes every `Config::loop_slice()`
-   (100 ms by default).
-2. For each symbol it calls `MockFeed::step` to advance one geometric
-   Brownian motion step and produce a `Tick`.
+1. `MarketDataService::run_yahoo_loop` issues a Yahoo quote request every
+   `Config::quote_poll_interval()` (10 minutes by default), with backoff on
+   transport / HTTP failures.
+2. For each quote returned it builds a `Tick` (`regularMarketPrice`,
+   `regularMarketVolume` delta vs. the previous poll).
 3. `RingWriter::try_push` writes the tick at `head & kRingMask` and stores
    `head + 1` with `memory_order_release`. If the ring is full (i.e. the
    consumer fell hopelessly behind), the tick is dropped and the
@@ -122,5 +123,5 @@ There are three IPC layers stacked on this path:
    carrying a batch.
 
 The whole point of the layout is that the producer never crosses an OS
-boundary on the hot path: from `MarketDataService::run_loop` to the
+boundary on the hot path: from `MarketDataService::run_yahoo_loop` to the
 N-API binding is all writes and reads in a shared mapped region.

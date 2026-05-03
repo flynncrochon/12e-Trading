@@ -12,6 +12,8 @@ namespace {
 
 constexpr const char* kQuoteUrl    = "https://query1.finance.yahoo.com/v7/finance/quote";
 constexpr const char* kChartUrlFmt = "https://query1.finance.yahoo.com/v8/finance/chart/";
+constexpr const char* kSearchUrl   = "https://query1.finance.yahoo.com/v1/finance/search";
+constexpr const char* kScreenerUrl = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved";
 
 std::string join_symbols(const std::vector<std::string>& symbols) {
     // Yahoo accepts comma-separated symbols verbatim (no per-symbol escaping
@@ -218,6 +220,165 @@ ChartResult YahooClient::chart(const std::string&  symbol,
             p.has_close = true;
         }
         out.points.push_back(p);
+    }
+    return out;
+}
+
+ScreenerResult YahooClient::screener(std::string_view scr_id,
+                                     std::string_view region,
+                                     int              count) {
+    ScreenerResult out;
+    if (count <= 0) count = 50;
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (crumb_.empty()) {
+            auto a = auth_.fetch();
+            if (!a.ok()) {
+                out.error = "auth: " + a.error;
+                return out;
+            }
+            crumb_ = a.crumb;
+        }
+
+        std::string url = kScreenerUrl;
+        url += "?formatted=false&lang=en-US&region=";
+        url += http_.escape(std::string(region));
+        url += "&scrIds=";
+        url += http_.escape(std::string(scr_id));
+        url += "&count=";
+        url += std::to_string(count);
+        url += "&corsDomain=finance.yahoo.com&crumb=";
+        url += http_.escape(crumb_);
+
+        auto resp = http_.get(url, {"Accept: application/json"});
+        if (!resp.transport_ok()) {
+            out.error = "transport: " + resp.error;
+            return out;
+        }
+
+        if (resp.status_code == 401 && attempt == 0) {
+            crumb_.clear();
+            continue;
+        }
+
+        if (!resp.ok()) {
+            out.error = "HTTP " + std::to_string(resp.status_code);
+            return out;
+        }
+
+        nlohmann::json j;
+        try {
+            j = nlohmann::json::parse(resp.body);
+        } catch (const std::exception& e) {
+            out.error = std::string{"json parse: "} + e.what();
+            return out;
+        }
+
+        auto fin_it = j.find("finance");
+        if (fin_it == j.end() || !fin_it->is_object()) {
+            out.error = "missing finance object";
+            return out;
+        }
+
+        auto err_it = fin_it->find("error");
+        if (err_it != fin_it->end() && !err_it->is_null()) {
+            out.error = "yahoo error: " + err_it->dump();
+            return out;
+        }
+
+        auto result_it = fin_it->find("result");
+        if (result_it == fin_it->end() || !result_it->is_array() || result_it->empty()) {
+            // No groups returned — treat as empty success.
+            return out;
+        }
+
+        const auto& group = (*result_it)[0];
+        auto        quotes_it = group.find("quotes");
+        if (quotes_it == group.end() || !quotes_it->is_array()) {
+            return out;
+        }
+
+        out.quotes.reserve(quotes_it->size());
+        for (const auto& q : *quotes_it) {
+            ScreenerQuote sq;
+            if (auto it = q.find("symbol"); it != q.end() && it->is_string()) {
+                sq.symbol = it->get<std::string>();
+            }
+            if (sq.symbol.empty()) continue;
+            if (auto it = q.find("shortName"); it != q.end() && it->is_string()) {
+                sq.short_name = it->get<std::string>();
+            }
+            extract_number(q, "regularMarketPrice", sq.price);
+            sq.has_change_pct = extract_number(q, "regularMarketChangePercent", sq.change_pct);
+            out.quotes.push_back(std::move(sq));
+        }
+        return out;
+    }
+
+    out.error = "auth: 401 after refresh";
+    return out;
+}
+
+YahooNewsResult YahooClient::news(const std::string& symbol, int count) {
+    YahooNewsResult out;
+
+    if (count <= 0) count = 10;
+
+    std::string url = kSearchUrl;
+    url += "?q=";
+    url += http_.escape(symbol);
+    url += "&newsCount=";
+    url += std::to_string(count);
+    url += "&quotesCount=0&enableFuzzyQuery=false&enableNavLinks=false";
+
+    auto resp = http_.get(url, {"Accept: application/json"});
+    if (!resp.transport_ok()) {
+        out.error = "transport: " + resp.error;
+        return out;
+    }
+    if (!resp.ok()) {
+        out.error = "HTTP " + std::to_string(resp.status_code);
+        return out;
+    }
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(resp.body);
+    } catch (const std::exception& e) {
+        out.error = std::string{"json parse: "} + e.what();
+        return out;
+    }
+
+    auto news_it = j.find("news");
+    if (news_it == j.end() || !news_it->is_array()) {
+        // No news for this symbol — treat as empty success.
+        return out;
+    }
+
+    out.items.reserve(news_it->size());
+    for (const auto& entry : *news_it) {
+        YahooNewsItem item;
+
+        if (auto it = entry.find("uuid"); it != entry.end() && it->is_string()) {
+            item.id = it->get<std::string>();
+        }
+        if (auto it = entry.find("title"); it != entry.end() && it->is_string()) {
+            item.title = it->get<std::string>();
+        }
+        if (auto it = entry.find("publisher"); it != entry.end() && it->is_string()) {
+            item.publisher = it->get<std::string>();
+        }
+        if (auto it = entry.find("link"); it != entry.end() && it->is_string()) {
+            item.link = it->get<std::string>();
+        }
+        if (auto it = entry.find("providerPublishTime");
+            it != entry.end() && it->is_number()) {
+            item.published_t_ms = it->get<std::int64_t>() * 1000;
+        }
+
+        // Drop items we can't display or correlate.
+        if (item.title.empty() || item.published_t_ms == 0) continue;
+        out.items.push_back(std::move(item));
     }
     return out;
 }
