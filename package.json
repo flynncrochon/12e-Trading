@@ -22,14 +22,16 @@
     "format": "prettier --write .",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "smoke:shm": "node scripts/run-smoke.mjs",
+    "smoke:yahoo-crumb": "node scripts/run-yahoo-crumb-smoke.mjs",
+    "smoke:yahoo-quote": "node scripts/run-yahoo-quote-smoke.mjs",
+    "smoke:yahoo-chart": "node scripts/run-yahoo-chart-smoke.mjs",
     "start": "electron-vite preview"
   },
   "dependencies": {
     "pino": "^9.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "recharts": "^3.8.1",
-    "yahoo-finance2": "^3.0.0"
+    "recharts": "^3.8.1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

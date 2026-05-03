@@ -1,65 +1,92 @@
 # 12e Trading
 
-An Electron-based stock trade viewer.
+An Electron-based stock trade viewer with a C++ market-data backend.
 
-The current data path uses a Node-side adapter in the Electron main process
-that polls Yahoo Finance every 2 seconds for a seeded set of US and ASX
-symbols, then forwards tick batches to a React renderer over IPC.
+A standalone C++ daemon (`market-data-service`) talks to Yahoo Finance directly
+and pushes everything the renderer needs into the Electron main process over
+two channels:
 
-A second data path is also present in the source tree: a C++ daemon that
-publishes ticks to a named shared-memory ring buffer and is read via an N-API
-addon. That path is no longer wired into `bootstrap()` but the source is kept
-intact for reference and can be re-enabled by restoring the daemon spawn in
-`src/main/index.ts`.
+- **Hot quote feed** — every 10 minutes for the watch list, written to a
+  named shared-memory ring buffer (SPSC, lock-free).
+- **History backfill + monthly summary** — one-shot at startup, pushed over
+  a length-prefixed JSON event channel on TCP loopback.
+
+Electron is a thin shim: spawn the daemon, drain the SHM ring via an N-API
+addon, accept the daemon's TCP connection for events, forward both streams
+to the React renderer over IPC.
 
 ## Architecture
 
 ```
-+------------------------------+
-|  market-data-service.exe     |   standalone C++ process
-|  (singletons:                |   - MockFeed generates synthetic ticks
-|     MarketDataService,       |   - SymbolRegistry holds the watch list
-|     SymbolRegistry,          |   - Logger / Config / MockFeed
-|     MockFeed,                |
-|     Logger, Config)          |
-+--------------+---------------+
-               |  writes Tick structs
-               v
-+------------------------------+
-|  named shared memory         |   Local\12eTrading-ticks-v1 (Windows)
-|  SPSC ring buffer            |   /12eTrading-ticks-v1     (POSIX)
-+--------------+---------------+
-               |  reads
-               v
-+------------------------------+
-|  shm-reader.node             |   N-API addon, loaded by Electron main
-|  pollTicks(maxN) -> Tick[]   |
-+--------------+---------------+
-               |  IPC (webContents.send)
-               v
-+------------------------------+
-|  React renderer              |   useTickStream -> price store -> rows
-+------------------------------+
+                                     +---------------------------+
+                                     |  Yahoo Finance            |
+                                     |  v7/quote, v8/chart       |
+                                     +-------------+-------------+
+                                                   |
+                                       libcurl (Schannel TLS on Windows)
+                                                   |
++-------------------------------------+            v
+|  market-data-service.exe            |  +------------------------+
+|  C++ singletons / threads:          |  |  HttpClient (libcurl)  |
+|    MarketDataService (producer)     |  |  YahooAuth   (crumb)   |
+|    YahooFeed   <-- 10-min quotes    |--|  YahooClient (quote +  |
+|    YahooHistory <-- backfill+summ.  |  |               chart)   |
+|    EventChannel <-- TCP -> Electron |  +------------------------+
+|    MockFeed (test fallback)         |
+|    SymbolRegistry, Config, Logger   |
++--------+----------------+-----------+
+         |                |
+         | hot ticks      | history + summary frames
+         v                v
++------------------+  +-----------------------------+
+| named SHM ring   |  | TCP loopback                |
+| Local\12eTrading |  | length-prefixed JSON        |
+|  -ticks-v1       |  | 127.0.0.1:<ephemeral>       |
+| 16 384 Tick slots|  +--------------+--------------+
++--------+---------+                 |
+         |                           |
+         v                           v
++------------------+      +--------------------------+
+| shm_reader.node  |      | EventBridge (Node net)   |
+| N-API addon      |      | parses frames, caches +  |
+| poll_ticks() per |      | webContents.send(...)    |
+| 16 ms            |      +--------------+-----------+
++--------+---------+                     |
+         | webContents.send('ticks',...) |
+         v                               v
++----------------------------------------------------------+
+| React renderer                                           |
+|   ticks   → price store → live row + sparkline           |
+|   history → 7-day chart series                           |
+|   summary → "vs ~1 month ago" % column                   |
++----------------------------------------------------------+
 ```
 
 A separate control channel (named pipe) is reserved for subscribe/unsubscribe
-commands and isn't wired up yet — only the hot tick stream flows in this
-first slice.
+commands and isn't wired up yet — every seeded symbol is polled
+unconditionally.
 
 ## Repo layout
 
 ```
 .
 ├── src/                    Electron + React (TypeScript)
-│   ├── main/                 main process: spawns daemon, polls reader, IPC to renderer
+│   ├── main/                 spawns daemon, drains SHM, accepts event TCP
+│   │   ├── daemon_supervisor.ts   spawn + crash-restart for the daemon
+│   │   ├── tick_bridge.ts         loads shm_reader.node, polls, IPC `ticks`
+│   │   ├── event_bridge.ts        TCP listener + frame parser + caches
+│   │   └── ipc_handlers.ts        symbols:list / subscribe / *:query
 │   ├── preload/              context-bridge surface exposed to the renderer
 │   └── renderer/             React UI — symbol list with live ticking prices
 ├── native/                 C++ workspace
-│   ├── common/               cross-process types: Tick, ShmRingBuffer, ShmLayout, ShmRegion
-│   ├── daemon/               market-data-service binary (singletons + producer loop)
-│   ├── reader/               shm-reader N-API addon for the Electron main process
-│   ├── tools/shm-smoke/      standalone consumer for verifying the daemon without Electron
-│   └── third_party/          CMake FetchContent landing zone (spdlog, fmt)
+│   ├── common/               shared SHM types: Tick, ShmRingBuffer, ShmRegion
+│   ├── yahoo/                HttpClient, YahooAuth, YahooClient (lib td_yahoo)
+│   ├── daemon/               market-data-service binary + EventChannel +
+│   │                         YahooFeed / YahooHistory / MockFeed
+│   ├── reader/               shm_reader N-API addon for the Electron main
+│   ├── tools/                standalone smoke binaries (see Scripts below)
+│   └── third_party/          CMake FetchContent landing zone (libcurl,
+│                             nlohmann_json — fetched on first configure)
 ├── electron.vite.config.ts main/preload/renderer wiring
 ├── electron-builder.yml    packaging (extraResources for the daemon, asarUnpack for *.node)
 ├── scripts/                build/clean/smoke convenience scripts
@@ -78,26 +105,28 @@ first slice.
   - Linux: GCC 12+ or Clang 15+
 - **Python 3** (only needed if cmake-js falls back to node-gyp on some ABIs)
 
+The first `pnpm build:native` fetches and builds libcurl + nlohmann/json via
+CMake FetchContent — expect a few minutes the first time, then cached.
+
 ## Getting started
 
 ```bash
 pnpm install
-pnpm dev            # launches Electron with HMR; live Yahoo feed starts automatically
+pnpm build:native       # required — Electron loads the daemon and shm addon
+pnpm dev                # launches Electron with HMR; daemon spawns on startup
 ```
 
-You should see an Electron window with 16 symbols (8 US + 8 ASX) whose
-prices update every ~2 seconds. The status badge in the top-right shows
-`live · Xs ago` while polling is healthy.
-
-`pnpm build:native` is only required if you intend to re-enable the C++
-daemon path described under [Optional: C++ daemon path](#optional-c-daemon-path).
+You should see an Electron window with 16 symbols (8 US + 8 ASX). Live prices
+update every ~10 minutes (Yahoo's `regularMarketPrice`); the per-symbol
+sparkline backfills with a week of 1-minute closes a few seconds after launch.
 
 ## Live data feed
 
-The default data source is **Yahoo Finance** via the `yahoo-finance2` npm
-package. It is polled every 2 seconds in one batched `quote()` request and
-the results are converted to the same `IpcTick` shape the renderer already
-consumes — no renderer changes were needed to swap data sources.
+The daemon's `YahooFeed` polls Yahoo Finance's `v7/finance/quote` endpoint for
+the entire watch list every 10 minutes. The same daemon's `YahooHistory`
+fires once at startup, walks each symbol through `v8/finance/chart` for two
+queries: a 7-day 1-minute series for the sparkline, and a 35-day 1-day series
+for the "% vs ~1 month ago" column.
 
 ### Seeded symbols
 
@@ -106,23 +135,15 @@ consumes — no renderer changes were needed to swap data sources.
 | NASDAQ / NYSE | AAPL, MSFT, NVDA, TSLA, GOOG, META, AMZN, SPY |
 | ASX           | BHP.AX, CBA.AX, CSL.AX, NAB.AX, WBC.AX, ANZ.AX, FMG.AX, RIO.AX |
 
-To change the watch list, edit `SEED_SYMBOLS` in
-[`src/main/symbol_registry.ts`](src/main/symbol_registry.ts) and restart
-`pnpm dev`. Use Yahoo's ticker convention (e.g. `.AX` suffix for ASX,
-`.L` for LSE, `.TO` for TSX).
-
-### Status badge states
-
-| State | Meaning |
-| ----- | ------- |
-| `live · Xs ago` (green) | Last poll succeeded `X` seconds ago. |
-| `retrying · last ok Xs ago` (amber) | One or two consecutive polls failed; backoff in progress. |
-| `feed error: …` (red) | Three or more consecutive failures. The error message comes from the Yahoo client. |
-| `starting…` (grey) | First poll has not completed yet. |
+The watch list lives in two places that must stay in sync:
+[`native/daemon/src/SymbolRegistry.cpp`](native/daemon/src/SymbolRegistry.cpp)
+(C++ side, used by the daemon) and
+[`src/main/symbol_registry.ts`](src/main/symbol_registry.ts) (TS side, used
+by the renderer's `symbol_id → ticker` lookup).
 
 ### Market hours
 
-Yahoo returns the last close outside market hours, so the badge stays green
+Yahoo returns the last close outside market hours, so quote polls succeed
 24/7 but prices won't change.
 
 | Exchange | Local hours | UTC roughly |
@@ -130,29 +151,56 @@ Yahoo returns the last close outside market hours, so the badge stays green
 | NASDAQ / NYSE | Mon–Fri 09:30–16:00 ET | Mon–Fri 13:30–20:00 (DST: 14:30–21:00) |
 | ASX           | Mon–Fri 10:00–16:00 AEST/AEDT | Mon–Fri 00:00–06:00 (AEDT: 23:00–05:00) |
 
-### Caveats
+### Yahoo caveats
 
-- `yahoo-finance2` is an unofficial scraper. Yahoo can break the endpoint
-  without notice. The status badge will show `feed error: …` if that
-  happens — typically the fix is a `pnpm up yahoo-finance2`.
-- Per-tick `volume` is computed as the delta of `regularMarketVolume`
-  between consecutive polls (clamped to 0 across day rollover). The first
-  poll for each symbol emits `volume: 0`.
-- `ts_ns` reflects the time we observed the price, not Yahoo's
-  `regularMarketTime` (which can be stale in pre-market).
+Yahoo's quote/chart endpoints are unofficial and shift periodically. When
+the renderer goes silent, the standalone smoke tools are how to localise the
+break:
 
-## Optional: C++ daemon path
+| Symptom | Try |
+| ------- | --- |
+| No quote updates | `pnpm smoke:yahoo-crumb` then `pnpm smoke:yahoo-quote` |
+| Empty sparklines | `pnpm smoke:yahoo-chart AAPL 7 1m` |
 
-The original C++ market-data daemon and N-API reader still live in
-[`native/`](native/) and remain buildable:
+Other things to know:
 
-```bash
-pnpm build:native
-```
+- The daemon's `YahooClient::quote` performs Yahoo's two-step crumb dance
+  (GET `fc.yahoo.com` for cookies, GET `/v1/test/getcrumb` for the token)
+  and refreshes the crumb on a 401 transparently. The crumb typically
+  rotates every ~24 h.
+- `v8/finance/chart` started 4xxing requests that omit `period2`; the C++
+  client now always sends both `period1` and `period2`.
+- Per-tick `volume` is the delta of `regularMarketVolume` between
+  consecutive polls (clamped to 0 across day rollover). The first poll for
+  each symbol emits `volume: 0`.
+- `Tick.ts_ns` is the daemon's monotonic clock at observation time, not
+  Yahoo's `regularMarketTime` (which can be stale in pre-market).
 
-It is no longer wired into `bootstrap()`. To swap back, restore the
-`DaemonSupervisor` + `attach_to_daemon` block in `src/main/index.ts` and
-remove the `start_yahoo_feed` call. See git history for the previous version.
+## Event channel
+
+The history backfill and monthly summary are too bursty and too variable in
+size for the SPSC tick ring (one batch can be thousands of points). They get
+their own out-of-band channel:
+
+- The Electron main creates a TCP listener on `127.0.0.1:0` (ephemeral port)
+  before spawning the daemon.
+- The daemon is launched with `--event-port=N` and connects back as a TCP
+  client at startup. It reuses the same connection for every event.
+- Wire format is **`[uint32 length, little-endian][N bytes UTF-8 JSON]`**.
+- Two event types today:
+
+  ```json
+  {"type":"history:backfill","symbol_id":0,"points":[{"t":1730851200000,"price":189.84}, ...]}
+  {"type":"summary:update","symbol_id":0,"month_ago_price":255.92,"month_ago_t":1774825200000}
+  ```
+
+- The Electron-side `EventBridge` parses frames, caches the latest of each
+  per `symbol_id`, and forwards them to the renderer via the existing
+  `history:backfill` and `summary:update` IPC channels.
+
+`scripts/test-event-channel.mjs` is a self-contained verifier — it spawns the
+daemon and prints one line per frame received. Useful when developing the
+daemon without firing up Electron.
 
 ## Scripts
 
@@ -160,10 +208,13 @@ remove the `start_yahoo_feed` call. See git history for the previous version.
 | ------------------- | ----------------------------------------------------------------- |
 | `pnpm dev`          | electron-vite dev server with main/renderer HMR                   |
 | `pnpm build`        | Bundles main, preload, and renderer into `out/`                   |
-| `pnpm build:native` | Configures and builds the C++ daemon and the N-API reader addon   |
+| `pnpm build:native` | Configures and builds the C++ daemon, td_yahoo, the N-API reader, and the smoke tools |
 | `pnpm rebuild:native` | Wipes `native/build/` first, then rebuilds                      |
 | `pnpm package`      | Builds JS + native and produces an installer via electron-builder |
-| `pnpm smoke:shm`    | Runs the standalone `shm-smoke` consumer against a live daemon    |
+| `pnpm smoke:shm`    | Runs `shm-smoke` against a live daemon (verifies the SPSC ring)   |
+| `pnpm smoke:yahoo-crumb` | Runs the Yahoo crumb fetch in isolation                      |
+| `pnpm smoke:yahoo-quote` | Calls `YahooClient::quote` for a symbol list, prints prices  |
+| `pnpm smoke:yahoo-chart` | Calls `YahooClient::chart` and prints summary stats          |
 | `pnpm typecheck`    | `tsc --noEmit` for both renderer/preload and main configs         |
 | `pnpm lint`         | ESLint on the TypeScript/React sources                            |
 | `pnpm format`       | Prettier write across the repo                                    |
@@ -173,24 +224,35 @@ remove the `start_yahoo_feed` call. See git history for the previous version.
 
 The daemon is intentionally singleton-heavy. Each singleton is the classic
 Meyers form (`static T& instance()` returning a function-local static, with
-copy/move deleted). The five singletons:
+copy/move deleted). The singletons:
 
-- **`Logger`** — wraps spdlog with a rotating file sink + stderr sink.
-- **`Config`** — process-wide settings (tick rate, ring sizing). Loads
-  `config.json` next to the binary if present, otherwise compiled defaults.
-- **`SymbolRegistry`** — fixed seed list for now (`AAPL MSFT NVDA TSLA GOOG META AMZN SPY`).
+- **`Logger`** — minimal thread-safe stderr logger with microsecond timestamps.
+- **`Config`** — process-wide settings (feed kind, tick rate, poll interval,
+  history lookbacks). Defaults are compiled in; `config.json` loading is
+  reserved for later.
+- **`SymbolRegistry`** — fixed seed list (must match `src/main/symbol_registry.ts`).
   Real subscribe/unsubscribe will arrive on the control channel later.
-- **`MockFeed`** — geometric-Brownian-motion price generator. Produces a tick
-  per symbol per cycle at the rate set in `Config`.
-- **`MarketDataService`** — owns the producer thread and the ring-buffer writer.
-  Drains `MockFeed → Tick → ring`.
+- **`MockFeed`** — geometric-Brownian-motion price generator. Used when
+  `Config::feed_kind() == FeedKind::Mock` (test fallback).
+- **`YahooFeed`** — owns one `HttpClient` + `YahooClient`. `poll()` performs
+  one HTTP round-trip for the full watch list and returns one `Tick` per
+  symbol that returned a price, with volume computed as the delta vs the
+  prior poll.
+- **`MarketDataService`** — owns the SHM region, the producer thread, and
+  the ring writer. At `start()` it picks `MockFeed` or `YahooFeed` based on
+  `Config::feed_kind()` and runs the corresponding loop.
+
+`YahooHistory` (not a singleton — held by `main()` only when `--event-port`
+is supplied) runs in its own background thread. It walks the watch list
+sequentially, calls `YahooClient::chart` for backfill and summary, and
+pushes one JSON frame per result over the `EventChannel`.
 
 ### Testability escape hatch
 
-Singletons make it impossible to run two services or to unit-test in isolation.
-Each singleton exposes a `reset_for_tests()` shim. If you find yourself
-reaching for it more than once, that's the signal to refactor the singleton
-into a thin accessor over an injectable implementation.
+Singletons make it impossible to run two services or to unit-test in
+isolation. Each singleton exposes a `reset_for_tests()` shim. If you find
+yourself reaching for it more than once, that's the signal to refactor the
+singleton into a thin accessor over an injectable implementation.
 
 ## Shared-memory protocol
 

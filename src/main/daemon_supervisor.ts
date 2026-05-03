@@ -15,7 +15,7 @@ export class DaemonSupervisor {
   private stopping = false;
   private crashes = 0;
 
-  constructor(private readonly binary_path: string) {}
+  constructor(private readonly binary_path: string, private readonly args: string[] = []) {}
 
   start(): void {
     if (this.child) return;
@@ -24,8 +24,8 @@ export class DaemonSupervisor {
   }
 
   private spawn_child(): void {
-    logger.info({ binary: this.binary_path }, 'daemon-supervisor: spawning');
-    const child = spawn(this.binary_path, [], {
+    logger.info({ binary: this.binary_path, args: this.args }, 'daemon-supervisor: spawning');
+    const child = spawn(this.binary_path, this.args, {
       cwd: dirname(this.binary_path),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,

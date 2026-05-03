@@ -31,6 +31,10 @@ public:
     // Returns nullptr if id is out of range.
     const Entry* find(std::uint32_t id) const noexcept;
 
+    // Returns nullptr if no entry has that ticker. Linear scan; the table is
+    // small (~16 entries) so a hash map would be overkill.
+    const Entry* find_by_ticker(std::string_view ticker) const noexcept;
+
     static void reset_for_tests();
 
 private:

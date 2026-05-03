@@ -1,14 +1,21 @@
 #include "Config.h"
+#include "EventChannel.h"
 #include "Logger.h"
 #include "MarketDataService.h"
 #include "MockFeed.h"
 #include "ShmLayout.h"
 #include "SymbolRegistry.h"
+#include "YahooHistory.h"
 
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <thread>
 
 #ifdef _WIN32
@@ -53,17 +60,30 @@ void install_signal_handlers() {
 #endif
 }
 
+// Parses --event-port=N or --event-port N. Any other args are ignored.
+std::optional<std::uint16_t> parse_event_port(int argc, char** argv) {
+    constexpr std::string_view kFlag = "--event-port";
+    for (int i = 1; i < argc; ++i) {
+        std::string_view arg = argv[i];
+        if (arg == kFlag && i + 1 < argc) {
+            const long v = std::strtol(argv[i + 1], nullptr, 10);
+            if (v > 0 && v < 65'536) return static_cast<std::uint16_t>(v);
+        } else if (arg.starts_with(kFlag) && arg.size() > kFlag.size() && arg[kFlag.size()] == '=') {
+            const long v = std::strtol(arg.data() + kFlag.size() + 1, nullptr, 10);
+            if (v > 0 && v < 65'536) return static_cast<std::uint16_t>(v);
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     using namespace td;
 
     install_signal_handlers();
     Logger::instance().info("market-data-service: starting");
 
-    // Touch each singleton in order. Construction is lazy; doing it here
-    // makes the order explicit and guarantees Logger/Config/Symbols exist
-    // before anyone else grabs them.
     (void) Config::instance();
     (void) SymbolRegistry::instance();
     (void) MockFeed::instance();
@@ -76,6 +96,31 @@ int main() {
     }
 
     MarketDataService::instance().start();
+
+    // Optional event channel: if --event-port=N was passed, connect back to
+    // the Electron main and run the one-shot history backfill + summary.
+    EventChannel                channel;
+    std::optional<YahooHistory> history;
+    if (auto port = parse_event_port(argc, argv); port.has_value()) {
+        std::ostringstream os;
+        os << "market-data-service: event channel port=" << *port;
+        Logger::instance().info(os.str());
+
+        if (!channel.connect(*port)) {
+            std::ostringstream err;
+            err << "event channel: " << channel.last_error();
+            Logger::instance().warn(err.str());
+        } else {
+            auto& cfg = Config::instance();
+            history.emplace(channel,
+                            cfg.history_backfill_days(),
+                            cfg.summary_lookback_days(),
+                            cfg.month_ago_days());
+            history->start();
+        }
+    } else {
+        Logger::instance().info("market-data-service: no --event-port; skipping history+summary");
+    }
 
     // Status heartbeat every 5 seconds while the loop runs.
     auto last_log = std::chrono::steady_clock::now();
@@ -92,6 +137,8 @@ int main() {
     }
 
     Logger::instance().info("market-data-service: shutdown requested");
+    if (history) history->stop_and_join();
+    channel.close();
     MarketDataService::instance().stop();
     Logger::instance().info("market-data-service: bye");
     return 0;
