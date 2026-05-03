@@ -1,0 +1,48 @@
+appId: com.flynncrochon.12etrading
+productName: 12e Trading
+copyright: Copyright (c) 2026 Flynn Crochon
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.{md,markdown}'
+  - '!**/.editorconfig'
+  - '!**/.clang-format'
+  - '!**/.prettierrc'
+  - '!**/eslint.config.js'
+
+extraResources:
+  - from: native/build/daemon/Release/market-data-service.exe
+    to: market-data-service.exe
+  - from: native/build/daemon/market-data-service.exe
+    to: market-data-service.exe
+
+asarUnpack:
+  - '**/*.node'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  category: public.app-category.finance
+
+linux:
+  target:
+    - AppImage
+  category: Office

@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\flynn\OneDrive\Documents\GitHub\12e-Trading\native\reader\build\CMakeFiles\04f83b583030eb21127179d6cc942d7c\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{E835DD00-0843-3470-A4DA-D5FBEA51BD7F}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
