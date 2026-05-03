@@ -1,10 +1,15 @@
 import { app, BrowserWindow } from 'electron';
 import { join } from 'node:path';
+import { DaemonSupervisor } from './daemon_supervisor';
+import { event_bridge } from './event_bridge';
 import { register_ipc_handlers } from './ipc_handlers';
-import { start_yahoo_feed, stop_yahoo_feed } from './live_feed/yahoo_client';
 import { logger } from './logger';
+import { resolve_daemon_path } from './paths';
+import { attach_to_daemon, start_poll_loop, stop_poll_loop } from './tick_bridge';
 
 let main_window: BrowserWindow | null = null;
+let supervisor: DaemonSupervisor | null = null;
+let event_port: number | null = null;
 let is_quitting = false;
 
 function create_main_window(): BrowserWindow {
@@ -46,11 +51,42 @@ function create_main_window(): BrowserWindow {
   return win;
 }
 
+/**
+ * Brings the full data pipeline up for a fresh window:
+ *   1. Attach the EventBridge listener (already started in bootstrap()).
+ *   2. Spawn the C++ market-data-service with --event-port=N — the daemon
+ *      runs the hot quote feed AND the one-shot history backfill + summary,
+ *      pushing all results to the renderer (ticks via SHM, history/summary
+ *      via the loopback event channel).
+ *   3. Attach the N-API shm reader and forward batched ticks over IPC.
+ */
+async function start_pipeline(window: BrowserWindow): Promise<void> {
+  event_bridge.set_window(window);
+  event_bridge.clear_caches();
+
+  if (event_port === null) {
+    logger.error('pipeline: event_bridge port not initialised');
+    return;
+  }
+
+  supervisor = new DaemonSupervisor(resolve_daemon_path(), [`--event-port=${event_port}`]);
+  supervisor.start();
+
+  const attached = await attach_to_daemon();
+  if (attached) {
+    start_poll_loop(window);
+  } else {
+    logger.error('pipeline: failed to attach to daemon shared memory');
+  }
+}
+
 async function bootstrap(): Promise<void> {
   register_ipc_handlers();
-
+  // Listener has to come up before the daemon spawn so the daemon's
+  // connect() call has somewhere to land.
+  event_port = await event_bridge.start();
   main_window = create_main_window();
-  start_yahoo_feed(main_window);
+  await start_pipeline(main_window);
 }
 
 app.whenReady().then(bootstrap).catch((err) => {
@@ -58,7 +94,6 @@ app.whenReady().then(bootstrap).catch((err) => {
 });
 
 app.on('window-all-closed', () => {
-  // We have a single-window UX. Quit on Windows/Linux; macOS users expect the app to stay alive.
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -67,7 +102,9 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0 && !is_quitting) {
     main_window = create_main_window();
-    start_yahoo_feed(main_window);
+    start_pipeline(main_window).catch((err) => {
+      logger.error({ err: String(err) }, 'reactivate pipeline failed');
+    });
   }
 });
 
@@ -77,6 +114,15 @@ app.on('before-quit', (event) => {
   event.preventDefault();
 
   logger.info('before-quit: stopping pipeline');
-  stop_yahoo_feed();
-  app.exit(0);
+  stop_poll_loop();
+  const stop_supervisor = supervisor ? supervisor.stop() : Promise.resolve();
+  Promise.allSettled([stop_supervisor, event_bridge.stop()])
+    .then((results) => {
+      for (const r of results) {
+        if (r.status === 'rejected') {
+          logger.error({ err: String(r.reason) }, 'before-quit: shutdown failed');
+        }
+      }
+    })
+    .finally(() => app.exit(0));
 });

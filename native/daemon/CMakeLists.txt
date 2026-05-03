@@ -4,11 +4,17 @@ add_executable(market-data-service
     src/Config.cpp
     src/SymbolRegistry.cpp
     src/MockFeed.cpp
+    src/YahooFeed.cpp
+    src/YahooHistory.cpp
+    src/EventChannel.cpp
     src/MarketDataService.cpp
 )
 
 target_include_directories(market-data-service PRIVATE include)
-target_link_libraries(market-data-service PRIVATE td_common)
+target_link_libraries(market-data-service PRIVATE td_common td_yahoo)
+if(WIN32)
+    target_link_libraries(market-data-service PRIVATE Ws2_32)
+endif()
 
 if(WIN32)
     set_target_properties(market-data-service PROPERTIES
