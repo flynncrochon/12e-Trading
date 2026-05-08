@@ -1,5 +1,6 @@
 import { type BrowserWindow } from 'electron';
 import * as net from 'node:net';
+import { classify_headline, type SentimentScore } from './finbert';
 import { logger } from './logger';
 
 const HEADER_BYTES = 4;
@@ -35,6 +36,12 @@ export interface NewsItem {
   adjusted_pct: number;
   /** Today's % change from the day_losers screener that surfaced this stock. */
   daily_change_pct: number;
+  /**
+   * FinBERT classification of the headline. Null while the classifier is
+   * still loading (first-run model download) or if classification failed —
+   * the renderer falls back to keyword filtering in that case.
+   */
+  sentiment: SentimentScore | null;
 }
 
 interface DaemonEvent {
@@ -216,15 +223,34 @@ class EventBridge {
           benchmark_pct: event.benchmark_pct as number,
           adjusted_pct: event.adjusted_pct as number,
           daily_change_pct: (event.daily_change_pct as number) ?? 0,
+          sentiment: null,
         };
+        // Send the unscored item immediately so the renderer can show news
+        // while the classifier is still warming up. Then classify in the
+        // background and re-emit with sentiment attached — the renderer's
+        // store is keyed by news_id so the second emit upgrades the entry
+        // in place rather than duplicating it.
         this.news_cache.set(item.news_id, item);
         if (this.window && !this.window.isDestroyed()) {
           this.window.webContents.send('news:item', item);
         }
+        void this.attach_sentiment(item);
         return;
       }
       default:
         logger.warn({ type: event.type }, 'event-bridge: unknown event type');
+    }
+  }
+
+  private async attach_sentiment(item: NewsItem): Promise<void> {
+    const sentiment = await classify_headline(item.title);
+    if (!sentiment) return;
+    const cached = this.news_cache.get(item.news_id);
+    if (!cached) return;
+    const updated: NewsItem = { ...cached, sentiment };
+    this.news_cache.set(item.news_id, updated);
+    if (this.window && !this.window.isDestroyed()) {
+      this.window.webContents.send('news:item', updated);
     }
   }
 }

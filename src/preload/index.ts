@@ -29,6 +29,11 @@ export interface SymbolSummary {
   month_ago_t: number;
 }
 
+export interface SentimentScore {
+  label: 'positive' | 'negative' | 'neutral';
+  score: number;
+}
+
 export interface NewsItem {
   ticker: string;
   short_name: string;
@@ -42,6 +47,7 @@ export interface NewsItem {
   benchmark_pct: number;
   adjusted_pct: number;
   daily_change_pct: number;
+  sentiment: SentimentScore | null;
 }
 
 export interface TradingApi {

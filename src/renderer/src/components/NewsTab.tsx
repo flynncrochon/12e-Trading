@@ -35,11 +35,9 @@ const PRESETS: ReadonlyArray<{ id: Exclude<PresetId, 'custom'>; label: string; d
 // errs on precision. A missed item just falls back to the toggle-off
 // view, so it's safer to under-match than to over-match.
 //
-// Note: there's no separate "routine" exclusion list. A headline like
-// "stock plunges after Q1 earnings miss" used to get dropped because of
-// "earnings"; now it correctly passes via "plunges". Earnings/guidance
-// reports without a negative signal are still excluded (just by failing
-// this list, not by a separate gate).
+// Routine earnings/revenue language is filtered separately by
+// REVENUE_KEYWORDS below — that exclusion runs even when a headline
+// also contains a negative signal here.
 const NEGATIVE_SIGNAL_KEYWORDS = [
   // Price-action language
   'plunge', 'plunges', 'plunged',
@@ -106,7 +104,6 @@ const NEGATIVE_SIGNAL_KEYWORDS = [
 
   // Warnings / negative outlook
   'warning', 'warns', 'warned',
-  'profit warning',
   'slowdown',
   'crisis',
   'shortage',
@@ -133,6 +130,57 @@ const NEGATIVE_REGEX = new RegExp(
 
 function has_negative_signal(title: string): boolean {
   return NEGATIVE_REGEX.test(title);
+}
+
+// Confidence floor for treating a FinBERT prediction as a negative
+// headline. FinBERT is well-calibrated on financial text — clear
+// negatives tend to land at 0.9+, so 0.7 keeps borderline-neutral
+// stories out of the black-swan view without over-pruning real ones.
+const SENTIMENT_NEGATIVE_THRESHOLD = 0.7;
+
+function is_negative_headline(item: NewsItem): boolean {
+  // Prefer the FinBERT classification when it has landed (it arrives a
+  // few hundred ms after the item itself). Fall back to the keyword
+  // regex while the model is still loading on first run, so the view
+  // isn't empty during the cold start.
+  if (item.sentiment) {
+    return item.sentiment.label === 'negative'
+      && item.sentiment.score >= SENTIMENT_NEGATIVE_THRESHOLD;
+  }
+  return has_negative_signal(item.title);
+}
+
+// Routine earnings / revenue / guidance language. Headlines matching any
+// of these are dropped as a hard exclusion (not behind the black-swan
+// toggle) — quarterly results and forward guidance aren't the
+// black-swan events this view is built for, even when the headline also
+// contains a negative price-action word like "plunges" or "slashed".
+const REVENUE_KEYWORDS = [
+  'earnings',
+  'revenue', 'revenues',
+  'eps',
+  'guidance',
+  'forecast', 'forecasts', 'forecasted',
+  'outlook',
+  'quarterly', 'quarter',
+  'q1', 'q2', 'q3', 'q4',
+  'profit', 'profits',
+  'estimates', 'estimate', 'expectations',
+  'margins', 'margin',
+  'top-line', 'top line', 'bottom-line', 'bottom line',
+];
+
+const REVENUE_REGEX = new RegExp(
+  `\\b(?:${REVENUE_KEYWORDS.map((k) =>
+    k
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\s+/g, '\\s+'),
+  ).join('|')})\\b`,
+  'i',
+);
+
+function is_revenue_based(title: string): boolean {
+  return REVENUE_REGEX.test(title);
 }
 
 function start_of_today(): Date {
@@ -205,6 +253,7 @@ export function NewsTab() {
     let asx = 0;
     for (const it of items) {
       if (it.adjusted_pct >= 0) continue;
+      if (is_revenue_based(it.title)) continue;
       if (ticker_region(it.ticker) === 'asx') asx += 1;
       else us += 1;
     }
@@ -227,7 +276,8 @@ export function NewsTab() {
       it.adjusted_pct < 0 &&
       it.published_t >= window_ms.from_ms &&
       it.published_t < window_ms.to_ms &&
-      region_matches(it.ticker, region),
+      region_matches(it.ticker, region) &&
+      !is_revenue_based(it.title),
     );
   }, [items, window_ms, region]);
 
@@ -236,7 +286,7 @@ export function NewsTab() {
     if (black_swan) {
       const ceiling = -Math.abs(min_drop_pct);
       pool = pool.filter(
-        (it) => it.adjusted_pct <= ceiling && has_negative_signal(it.title),
+        (it) => it.adjusted_pct <= ceiling && is_negative_headline(it),
       );
     }
     return pool.slice().sort((a, b) => a.adjusted_pct - b.adjusted_pct);
@@ -295,7 +345,7 @@ export function NewsTab() {
   };
 
   const total_negative_in_cache = useMemo(
-    () => items.filter((it) => it.adjusted_pct < 0).length,
+    () => items.filter((it) => it.adjusted_pct < 0 && !is_revenue_based(it.title)).length,
     [items],
   );
 
@@ -367,8 +417,9 @@ export function NewsTab() {
           />
           Black swan only
           <span className="news-toggle-hint">
-            requires negative-signal language in the headline (plunge, lawsuit,
-            slashed, recall, layoff, etc.)
+            classifies the headline with FinBERT and keeps only negative
+            sentiment (≥ {SENTIMENT_NEGATIVE_THRESHOLD.toFixed(2)} confidence);
+            falls back to a keyword regex while the model is still loading.
           </span>
         </label>
         <label className="news-range-field">

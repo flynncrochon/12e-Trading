@@ -4,6 +4,11 @@
    functions — disable here, hook call-site rules still apply manually. */
 import { useSyncExternalStore } from 'react';
 
+export interface SentimentScore {
+  label: 'positive' | 'negative' | 'neutral';
+  score: number;
+}
+
 export interface NewsItem {
   ticker: string;
   short_name: string;
@@ -17,6 +22,7 @@ export interface NewsItem {
   benchmark_pct: number;
   adjusted_pct: number;
   daily_change_pct: number;
+  sentiment: SentimentScore | null;
 }
 
 type Listener = () => void;

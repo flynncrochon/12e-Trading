@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu } from 'electron';
 import { join } from 'node:path';
 import { DaemonSupervisor } from './daemon_supervisor';
 import { event_bridge } from './event_bridge';
+import { preload_classifier } from './finbert';
 import { register_ipc_handlers } from './ipc_handlers';
 import { logger } from './logger';
 import { resolve_daemon_path } from './paths';
@@ -83,6 +84,10 @@ async function start_pipeline(window: BrowserWindow): Promise<void> {
 async function bootstrap(): Promise<void> {
   Menu.setApplicationMenu(null);
   register_ipc_handlers();
+  // Kick off FinBERT load in parallel with daemon startup — the model is
+  // a one-time ~110 MB download into userData/models, and we'd rather
+  // pay it concurrently with the news fetch than serially after it.
+  preload_classifier();
   // Listener has to come up before the daemon spawn so the daemon's
   // connect() call has somewhere to land.
   event_port = await event_bridge.start();
